@@ -39,4 +39,5 @@ astro dev stop
 2. Airflow deployment using Astro CLI -> use a managed service or Kubernetes
 
 ## References:
--[Astro CLI]()
+- [Astro CLI](https://www.astronomer.io/docs/astro/cli/install-cli/)
+- [PostgreSQL Change Data Capture (CDC): The Complete Guide (DataCater)](https://datacater.io/blog/2021-09-02/postgresql-cdc-complete-guide.html)
