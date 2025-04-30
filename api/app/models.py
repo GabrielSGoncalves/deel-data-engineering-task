@@ -1,15 +1,16 @@
 from pydantic import BaseModel
 from typing import List
+from datetime import date
 
 
 class OpenOrder(BaseModel):
-    delivery_date: str
+    delivery_date: date
     status: str
     quantity: int
 
 
 class TopDeliveryDate(BaseModel):
-    delivery_date: str
+    delivery_date: date
     quantity: int
 
 
