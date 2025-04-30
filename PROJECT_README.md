@@ -18,13 +18,875 @@ The main components of our architecture are:
 - API: Dockerized FastAPI deployed on the same network as the Postgres finance_db container
 
 ### Source database
+We are going to use the customized Postgres container provided in the project requirements, deploying it through Docker Compose.
 
 ### Analytical database
 We decided to use the same Postgres instance as the source database (finance_db.operations), in order to focus on the design of the data pipeline and the data model, instead of the storage infrastructure. To foll
 
+### CDC tool
+We are going to use Postgres resources like triggers, procedures and functions to replicate a stream process between the source database ("finance_db.operations") and our Warehouse schema "finance_db.raw".
+
+### Data Modeling Resources
+The tables and views used in our Warehouse Data Model are going to be created with Postgres DDLs.
+
+### API
+The application API is going to be developed using FastAPI, and deploy is going to use Docker.
+
 On the "Final Thoughts" session at the end of this document, we explore a resilient and robust Data Architecture designed for production ready environments, that could implement the same logic presented here.
 
+## CDC Data Pipeline creation
+In this session we are going through the process of creating all the resources needed to synchronize data from the source database and also model it on the Data Warehouse schemas. Make sure to follow every step, creating all the resources indicated in the code blocks in order to be able to successfully test the API Application in the last part.
+All the resources indicated here are also defined in individual DDL files in the `sql/` folder, and subfolder `raw`,  `intermediate` and `presentation` reflecting its respective schemas.
 
+### Overview of the data flowing through the 
+Below is a diagram representing the main resources used for implementing the CDC logic for the `orders` table. The other tables, `order_items`, `products` and `customers` follow the same logic.
+![Pipeline Logic](images/acme_pipeline_logic.png)
+
+### Synchronization logic
+To implement a synchronization between the source database and the Data Warehouse (represented by the raw, intermediate and presentation schemas) we used a CDC approach with a function ({table_name}_audit_func) that responds to triggers ({table_name}_cdc_trigger) based on insert, update or delete events for the source table. The output for this function are records with the event type ('I', 'U' or 'D') for column `operatio`, and also the information about previous data for that record in column `old_data` (as JSON), and the `new_data` (also as JSON).
+
+### Slowly Changing Dimension logic
+As all tables can have inplace updates, we decided to use a Slowly Changing Dimension Type-2 approach in order to keep the history for each record. The SCD type-2 operation is performed for each one of the 4 tables by the procedure sync_{table_name}_items_target. Each procedure writes the data from change_logs tables into the respective intermediate tables, adding metadata and also the boolean information for the column `is_current`, which dictates if this record is the last version that reflects the source database.
+
+### Presentation schema
+The presentation schema is composed of views that reads from the intermediate tables, filtering by `is_current=True`, resulting in the last updated version for each table, without duplications. This is also the schema used by the API endpoints to return the information requested on the logistic reports.
+
+
+### DDLs and DMLs for the Data Pipeline
+In this session we are going to define the DDLs and DMLs needed to create all the Postgres resources for the implementation of the Data Pipeline. Make sure to execure it in sequence.
+
+#### Schemas and tables DDL
+In this session we are going to create the target schemas and tables our Data Platform.
+```sql
+create schema raw;
+create schema intermediate;
+create schema presentation;
+
+-- Creating the SCD type 2 tables
+-- orders
+CREATE TABLE intermediate.orders (
+    version_id BIGSERIAL PRIMARY KEY,
+    order_id BIGINT NOT NULL,
+    order_date DATE,
+    delivery_date DATE,
+    customer_id BIGINT,
+    status VARCHAR,
+    updated_at TIMESTAMP(3),
+    updated_by BIGINT,
+    created_at TIMESTAMP(3),
+    created_by BIGINT,
+    effective_start TIMESTAMPTZ NOT NULL,
+    effective_end TIMESTAMPTZ,
+    is_current BOOLEAN NOT NULL DEFAULT true,
+    operation_type CHAR(1) NOT NULL CHECK (operation_type IN ('I','U','D')),
+    change_timestamp TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX ON intermediate.orders (order_id);
+CREATE INDEX ON intermediate.orders (is_current);
+CREATE INDEX ON intermediate.orders (change_timestamp);
+
+-- order_items
+CREATE TABLE intermediate.order_items (
+  	version_id BIGSERIAL PRIMARY KEY,
+    order_item_id bigserial NOT NULL,
+    order_id bigint NULL,
+    product_id bigint NULL,
+    quanity integer NULL,
+    updated_at timestamp(3) without time zone NULL DEFAULT CURRENT_TIMESTAMP(3),
+    updated_by bigint NULL,
+    created_at timestamp(3) without time zone NULL DEFAULT CURRENT_TIMESTAMP(3),
+    created_by bigint NULL,
+  	effective_start TIMESTAMPTZ NOT NULL,
+    effective_end TIMESTAMPTZ,
+    is_current BOOLEAN NOT NULL DEFAULT true,
+    operation_type CHAR(1) NOT NULL CHECK (operation_type IN ('I','U','D')),
+    change_timestamp TIMESTAMPTZ NOT NULL
+  );
+
+CREATE INDEX ON intermediate.order_items (order_id);
+CREATE INDEX ON intermediate.order_items (is_current);
+CREATE INDEX ON intermediate.order_items (change_timestamp);
+
+-- customers
+CREATE TABLE intermediate.customers (
+    version_id BIGSERIAL PRIMARY KEY,
+    customer_id bigserial NOT NULL,
+    customer_name character varying(500) NOT NULL,
+    is_active boolean NOT NULL DEFAULT true,
+    customer_address character varying(500) NULL,
+    updated_at timestamp(3) without time zone NULL DEFAULT CURRENT_TIMESTAMP(3),
+    updated_by bigint NULL,
+    created_at timestamp(3) without time zone NULL DEFAULT CURRENT_TIMESTAMP(3),
+    created_by bigint NULL,
+  	effective_start TIMESTAMPTZ NOT NULL,
+    effective_end TIMESTAMPTZ,
+    is_current BOOLEAN NOT NULL DEFAULT true,
+    operation_type CHAR(1) NOT NULL CHECK (operation_type IN ('I','U','D')),
+    change_timestamp TIMESTAMPTZ NOT NULL
+  );
+  
+-- products
+CREATE TABLE intermediate.products (
+  	version_id BIGSERIAL PRIMARY KEY,
+    product_id bigserial NOT NULL,
+    product_name character varying(500) NOT NULL,
+    barcode character varying(26) NOT NULL,
+    unity_price numeric NOT NULL,
+    is_active boolean NULL,
+    updated_at timestamp(3) without time zone NULL DEFAULT CURRENT_TIMESTAMP(3),
+    updated_by bigint NULL,
+    created_at timestamp(3) without time zone NULL DEFAULT CURRENT_TIMESTAMP(3),
+    created_by bigint NULL,
+  	effective_start TIMESTAMPTZ NOT NULL,
+    effective_end TIMESTAMPTZ,
+    is_current BOOLEAN NOT NULL DEFAULT true,
+    operation_type CHAR(1) NOT NULL CHECK (operation_type IN ('I','U','D')),
+    change_timestamp TIMESTAMPTZ NOT NULL
+  );
+```
+And also the presentation schema views.
+```sql
+-- Creating presentation layer views
+CREATE OR REPLACE VIEW presentation.orders AS
+SELECT
+    order_id,
+    order_date,
+    delivery_date,
+    customer_id,
+    status,
+    updated_at,
+    updated_by,
+    created_at,
+    created_by
+FROM intermediate.orders
+WHERE is_current = true;
+
+--
+CREATE OR REPLACE VIEW presentation.order_items AS
+SELECT
+    order_item_id,
+    order_id,
+    product_id,
+    quanity AS quantity,
+    updated_at,
+    updated_by,
+    created_at,
+    created_by
+FROM intermediate.order_items
+WHERE is_current = true;
+
+CREATE OR REPLACE VIEW presentation.products AS
+SELECT
+    product_id,
+    product_name,
+    barcode,
+    unity_price,
+    is_active,
+    updated_at,
+    updated_by,
+    created_at,
+    created_by
+FROM intermediate.products
+WHERE is_current = true;
+
+CREATE OR REPLACE VIEW presentation.customers AS
+SELECT
+    customer_id,
+    customer_name,
+    is_active,
+    customer_address,
+    updated_at,
+    updated_by,
+    created_at,
+    created_by
+FROM intermediate.customers
+WHERE is_current = true;
+```
+
+#### Order Pipeline
+```sql
+-- Create orders changelog table
+CREATE TABLE raw.orders_changelog (
+    change_id BIGSERIAL PRIMARY KEY,
+    operation CHAR(1) NOT NULL CHECK (operation IN ('I','U','D')),
+    old_data JSONB,
+    new_data JSONB,
+    changed_by TEXT DEFAULT CURRENT_USER,
+    changed_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX ON raw.orders_changelog (changed_at);
+
+-- Create trigger function for orders
+CREATE OR REPLACE FUNCTION raw.orders_audit_func()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF (TG_OP = 'DELETE') THEN
+        INSERT INTO raw.orders_changelog (operation, old_data)
+        VALUES ('D', to_jsonb(OLD));
+        RETURN OLD;
+    ELSIF (TG_OP = 'UPDATE') THEN
+        INSERT INTO raw.orders_changelog (operation, old_data, new_data)
+        VALUES ('U', to_jsonb(OLD), to_jsonb(NEW));
+        RETURN NEW;
+    ELSIF (TG_OP = 'INSERT') THEN
+        INSERT INTO raw.orders_changelog (operation, new_data)
+        VALUES ('I', to_jsonb(NEW));
+        RETURN NEW;
+    END IF;
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Backfill existing order records
+INSERT INTO raw.orders_changelog (operation, new_data, changed_by, changed_at)
+SELECT 
+    'I', 
+    to_jsonb(o), 
+    CURRENT_USER, 
+    NOW()
+FROM operations.orders o;  -- Assuming source table is operations.orders
+
+-- Create trigger for order changes
+CREATE TRIGGER orders_cdc_trigger
+AFTER INSERT OR UPDATE OR DELETE ON operations.orders
+FOR EACH ROW EXECUTE FUNCTION raw.orders_audit_func();
+
+-- Initialize CDC sync state for orders
+INSERT INTO intermediate.cdc_sync_state (table_name) 
+VALUES ('operations.orders') 
+ON CONFLICT DO NOTHING;
+
+-- Create order type
+CREATE TYPE intermediate.order_type AS (
+    order_id BIGINT,
+    order_date DATE,
+    delivery_date DATE,
+    customer_id BIGINT,
+    status VARCHAR,
+    updated_at TIMESTAMP(3),
+    updated_by BIGINT,
+    created_at TIMESTAMP(3),
+    created_by BIGINT
+);
+
+-- Create sync procedure for orders
+CREATE OR REPLACE PROCEDURE intermediate.sync_orders_target()
+LANGUAGE plpgsql AS $$
+DECLARE
+    _last_id BIGINT;
+    _change RECORD;
+    _new_row intermediate.order_type;
+    _old_row intermediate.order_type;
+BEGIN
+    SELECT last_processed_change_id INTO _last_id
+    FROM intermediate.cdc_sync_state
+    WHERE table_name = 'operations.orders';
+
+    FOR _change IN
+        SELECT change_id, operation, old_data, new_data, changed_at
+        FROM raw.orders_changelog
+        WHERE change_id > _last_id
+        ORDER BY change_id
+    LOOP
+        IF _change.operation = 'I' THEN
+            _new_row := jsonb_populate_record(null::intermediate.order_type, _change.new_data);
+            
+            INSERT INTO intermediate.orders (
+                order_id, order_date, delivery_date, customer_id, status,
+                updated_at, updated_by, created_at, created_by,
+                effective_start, operation_type, change_timestamp
+            )
+            VALUES (
+                _new_row.order_id,
+                _new_row.order_date,
+                _new_row.delivery_date,
+                _new_row.customer_id,
+                _new_row.status,
+                _new_row.updated_at,
+                _new_row.updated_by,
+                _new_row.created_at,
+                _new_row.created_by,
+                _change.changed_at,
+                'I',
+                _change.changed_at
+            );
+
+        ELSIF _change.operation = 'U' THEN
+            _new_row := jsonb_populate_record(null::intermediate.order_type, _change.new_data);
+            
+            UPDATE intermediate.orders
+            SET effective_end = _change.changed_at,
+                is_current = false
+            WHERE order_id = _new_row.order_id
+              AND is_current = true;
+
+            INSERT INTO intermediate.orders (
+                order_id, order_date, delivery_date, customer_id, status,
+                updated_at, updated_by, created_at, created_by,
+                effective_start, operation_type, change_timestamp
+            )
+            VALUES (
+                _new_row.order_id,
+                _new_row.order_date,
+                _new_row.delivery_date,
+                _new_row.customer_id,
+                _new_row.status,
+                _new_row.updated_at,
+                _new_row.updated_by,
+                _new_row.created_at,
+                _new_row.created_by,
+                _change.changed_at,
+                'U',
+                _change.changed_at
+            );
+
+        ELSIF _change.operation = 'D' THEN
+            _old_row := jsonb_populate_record(null::intermediate.order_type, _change.old_data);
+            
+            UPDATE intermediate.orders
+            SET effective_end = _change.changed_at,
+                is_current = false,
+                operation_type = 'D'
+            WHERE order_id = _old_row.order_id
+              AND is_current = true;
+        END IF;
+
+        _last_id := _change.change_id;
+    END LOOP;
+
+    UPDATE intermediate.cdc_sync_state
+    SET last_processed_change_id = _last_id
+    WHERE table_name = 'operations.orders';
+
+    COMMIT;
+END;
+$$;
+
+-- Test the sync
+CALL intermediate.sync_orders_target();
+
+-- Validate counts
+SELECT COUNT(1) FROM raw.orders_changelog;
+SELECT COUNT(1) FROM intermediate.orders;
+
+```
+#### Order Items Pipeline
+```sql
+-- Create changelog table
+CREATE TABLE raw.order_items_changelog (
+    change_id BIGSERIAL PRIMARY KEY,
+    operation CHAR(1) NOT NULL CHECK (operation IN ('I','U','D')),
+    old_data JSONB,
+    new_data JSONB,
+    changed_by TEXT DEFAULT CURRENT_USER,
+    changed_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX ON raw.order_items_changelog (changed_at);
+
+-- Create trigger function
+CREATE OR REPLACE FUNCTION raw.order_items_audit_func()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF (TG_OP = 'DELETE') THEN
+        INSERT INTO raw.order_items_changelog (operation, old_data)
+        VALUES ('D', to_jsonb(OLD));
+        RETURN OLD;
+    ELSIF (TG_OP = 'UPDATE') THEN
+        INSERT INTO raw.order_items_changelog (operation, old_data, new_data)
+        VALUES ('U', to_jsonb(OLD), to_jsonb(NEW));
+        RETURN NEW;
+    ELSIF (TG_OP = 'INSERT') THEN
+        INSERT INTO raw.order_items_changelog (operation, new_data)
+        VALUES ('I', to_jsonb(NEW));
+        RETURN NEW;
+    END IF;
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Backfill existing records as initial inserts
+-- truncate table raw.order_items_changelog;
+INSERT INTO raw.order_items_changelog (operation, new_data, changed_by, changed_at)
+SELECT 
+    'I', 
+    to_jsonb(oi), 
+    CURRENT_USER, 
+    NOW()
+FROM finance_db.operations.order_items oi;
+
+-- Create trigger for future changes
+-- DROP TRIGGER IF EXISTS order_items_cdc_trigger ON operations.order_items;
+CREATE TRIGGER order_items_cdc_trigger
+AFTER INSERT OR UPDATE OR DELETE ON operations.order_items
+FOR EACH ROW EXECUTE FUNCTION raw.order_items_audit_func();
+
+select count(1) from raw.order_items_changelog;
+select count(1) from operations.order_items;
+--
+
+SELECT COUNT(*) FROM raw.order_items_changelog WHERE operation != 'I';
+
+-- Creating the logic for updating the intermediate table
+-- Tracks last processed change ID
+CREATE TABLE intermediate.cdc_sync_state (
+    table_name TEXT PRIMARY KEY,
+    last_processed_change_id BIGINT NOT NULL DEFAULT 0
+);
+
+-- Initialize for orders table
+INSERT INTO intermediate.cdc_sync_state (table_name) 
+VALUES ('operations.order_items') 
+ON CONFLICT DO NOTHING;
+
+select * from intermediate.cdc_sync_state;
+
+CREATE TYPE intermediate.order_item_type AS (
+    order_item_id BIGINT,
+    order_id BIGINT,
+    product_id BIGINT,
+    quanity INTEGER,
+    updated_at TIMESTAMP(3),
+    updated_by BIGINT,
+    created_at TIMESTAMP(3),
+    created_by BIGINT
+);
+
+CREATE OR REPLACE PROCEDURE intermediate.sync_order_items_target()
+LANGUAGE plpgsql AS $$
+DECLARE
+    _last_id BIGINT;
+    _change RECORD;
+    _new_row intermediate.order_item_type;
+    _old_row intermediate.order_item_type;
+BEGIN
+    SELECT last_processed_change_id INTO _last_id
+    FROM intermediate.cdc_sync_state
+    WHERE table_name = 'operations.order_items';
+
+    FOR _change IN
+        SELECT change_id, operation, old_data, new_data, changed_at
+        FROM raw.order_items_changelog
+        WHERE change_id > _last_id
+        ORDER BY change_id
+    LOOP
+        IF _change.operation = 'I' THEN
+            _new_row := jsonb_populate_record(null::intermediate.order_item_type, _change.new_data);
+            
+            INSERT INTO intermediate.order_items (
+                order_item_id, order_id, product_id, quanity,
+                updated_at, updated_by, created_at, created_by,
+                effective_start, operation_type, change_timestamp
+            )
+            VALUES (
+                _new_row.order_item_id,
+                _new_row.order_id,
+                _new_row.product_id,
+                _new_row.quanity,
+                _new_row.updated_at,
+                _new_row.updated_by,
+                _new_row.created_at,
+                _new_row.created_by,
+                _change.changed_at,
+                'I',
+                _change.changed_at
+            );
+
+        ELSIF _change.operation = 'U' THEN
+            _new_row := jsonb_populate_record(null::intermediate.order_item_type, _change.new_data);
+            
+            UPDATE intermediate.order_items
+            SET effective_end = _change.changed_at,
+                is_current = false
+            WHERE order_item_id = _new_row.order_item_id
+              AND is_current = true;
+
+            INSERT INTO intermediate.order_items (
+                order_item_id, order_id, product_id, quanity,
+                updated_at, updated_by, created_at, created_by,
+                effective_start, operation_type, change_timestamp
+            )            
+            VALUES (
+            		_new_row.order_item_id,
+                _new_row.order_id,
+                _new_row.product_id,
+                _new_row.quanity,
+                _new_row.updated_at,
+                _new_row.updated_by,
+                _new_row.created_at,
+                _new_row.created_by,
+                _change.changed_at,
+                'I',
+                _change.changed_at
+            );
+
+        ELSIF _change.operation = 'D' THEN
+            _old_row := jsonb_populate_record(null::intermediate.order_item_type, _change.old_data);
+            
+            UPDATE intermediate.order_items
+            SET effective_end = _change.changed_at,
+                is_current = false,
+                operation_type = 'D'
+            WHERE order_item_id = _old_row.order_item_id
+              AND is_current = true;
+        END IF;
+
+        _last_id := _change.change_id;
+    END LOOP;
+
+    UPDATE intermediate.cdc_sync_state
+    SET last_processed_change_id = _last_id
+    WHERE table_name = 'operations.order_items';
+
+    COMMIT;
+END;
+$$;
+
+
+CALL intermediate.sync_order_items_target();
+
+select count(1) from intermediate.order_items;
+```
+
+#### Products Pipeline
+```sql
+-- Create products changelog table
+CREATE TABLE raw.products_changelog (
+    change_id BIGSERIAL PRIMARY KEY,
+    operation CHAR(1) NOT NULL CHECK (operation IN ('I','U','D')),
+    old_data JSONB,
+    new_data JSONB,
+    changed_by TEXT DEFAULT CURRENT_USER,
+    changed_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX ON raw.products_changelog (changed_at);
+
+-- Create trigger function for products
+CREATE OR REPLACE FUNCTION raw.products_audit_func()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF (TG_OP = 'DELETE') THEN
+        INSERT INTO raw.products_changelog (operation, old_data)
+        VALUES ('D', to_jsonb(OLD));
+        RETURN OLD;
+    ELSIF (TG_OP = 'UPDATE') THEN
+        INSERT INTO raw.products_changelog (operation, old_data, new_data)
+        VALUES ('U', to_jsonb(OLD), to_jsonb(NEW));
+        RETURN NEW;
+    ELSIF (TG_OP = 'INSERT') THEN
+        INSERT INTO raw.products_changelog (operation, new_data)
+        VALUES ('I', to_jsonb(NEW));
+        RETURN NEW;
+    END IF;
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Backfill existing product records
+INSERT INTO raw.products_changelog (operation, new_data, changed_by, changed_at)
+SELECT 
+    'I', 
+    to_jsonb(p), 
+    CURRENT_USER, 
+    NOW()
+FROM operations.products p;
+
+select count(1) from raw.products_changelog;
+
+-- Create trigger for product changes
+CREATE TRIGGER products_cdc_trigger
+AFTER INSERT OR UPDATE OR DELETE ON operations.products
+FOR EACH ROW EXECUTE FUNCTION raw.products_audit_func();
+
+-- Initialize CDC sync state for products
+INSERT INTO intermediate.cdc_sync_state (table_name) 
+VALUES ('operations.products') 
+ON CONFLICT DO NOTHING;
+
+-- Create product type
+CREATE TYPE intermediate.product_type AS (
+    product_id BIGINT,
+    product_name VARCHAR(500),
+    barcode VARCHAR(26),
+    unity_price NUMERIC,
+    is_active BOOLEAN,
+    updated_at TIMESTAMP(3),
+    updated_by BIGINT,
+    created_at TIMESTAMP(3),
+    created_by BIGINT
+);
+
+-- Create sync procedure for products
+CREATE OR REPLACE PROCEDURE intermediate.sync_products_target()
+LANGUAGE plpgsql AS $$
+DECLARE
+    _last_id BIGINT;
+    _change RECORD;
+    _new_row intermediate.product_type;
+    _old_row intermediate.product_type;
+BEGIN
+    SELECT last_processed_change_id INTO _last_id
+    FROM intermediate.cdc_sync_state
+    WHERE table_name = 'operations.products';
+
+    FOR _change IN
+        SELECT change_id, operation, old_data, new_data, changed_at
+        FROM raw.products_changelog
+        WHERE change_id > _last_id
+        ORDER BY change_id
+    LOOP
+        IF _change.operation = 'I' THEN
+            _new_row := jsonb_populate_record(null::intermediate.product_type, _change.new_data);
+            
+            INSERT INTO intermediate.products (
+                product_id, product_name, barcode, unity_price, is_active,
+                updated_at, updated_by, created_at, created_by,
+                effective_start, operation_type, change_timestamp
+            )
+            VALUES (
+                _new_row.product_id,
+                _new_row.product_name,
+                _new_row.barcode,
+                _new_row.unity_price,
+                _new_row.is_active,
+                _new_row.updated_at,
+                _new_row.updated_by,
+                _new_row.created_at,
+                _new_row.created_by,
+                _change.changed_at,
+                'I',
+                _change.changed_at
+            );
+
+        ELSIF _change.operation = 'U' THEN
+            _new_row := jsonb_populate_record(null::intermediate.product_type, _change.new_data);
+            
+            UPDATE intermediate.products
+            SET effective_end = _change.changed_at,
+                is_current = false
+            WHERE product_id = _new_row.product_id
+              AND is_current = true;
+
+            INSERT INTO intermediate.products (
+                product_id, product_name, barcode, unity_price, is_active,
+                updated_at, updated_by, created_at, created_by,
+                effective_start, operation_type, change_timestamp
+            )
+            VALUES (
+                _new_row.product_id,
+                _new_row.product_name,
+                _new_row.barcode,
+                _new_row.unity_price,
+                _new_row.is_active,
+                _new_row.updated_at,
+                _new_row.updated_by,
+                _new_row.created_at,
+                _new_row.created_by,
+                _change.changed_at,
+                'U',
+                _change.changed_at
+            );
+
+        ELSIF _change.operation = 'D' THEN
+            _old_row := jsonb_populate_record(null::intermediate.product_type, _change.old_data);
+            
+            UPDATE intermediate.products
+            SET effective_end = _change.changed_at,
+                is_current = false,
+                operation_type = 'D'
+            WHERE product_id = _old_row.product_id
+              AND is_current = true;
+        END IF;
+
+        _last_id := _change.change_id;
+    END LOOP;
+
+    UPDATE intermediate.cdc_sync_state
+    SET last_processed_change_id = _last_id
+    WHERE table_name = 'operations.products';
+
+    COMMIT;
+END;
+$$;
+
+-- Test the sync
+CALL intermediate.sync_products_target();
+
+-- Verify counts
+SELECT COUNT(1) FROM raw.products_changelog;
+SELECT COUNT(1) FROM intermediate.products;
+```
+
+#### Customers Pipeline
+```sql
+-- Create customers changelog table
+CREATE TABLE raw.customers_changelog (
+    change_id BIGSERIAL PRIMARY KEY,
+    operation CHAR(1) NOT NULL CHECK (operation IN ('I','U','D')),
+    old_data JSONB,
+    new_data JSONB,
+    changed_by TEXT DEFAULT CURRENT_USER,
+    changed_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX ON raw.customers_changelog (changed_at);
+
+-- Create trigger function for customers
+CREATE OR REPLACE FUNCTION raw.customers_audit_func()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF (TG_OP = 'DELETE') THEN
+        INSERT INTO raw.customers_changelog (operation, old_data)
+        VALUES ('D', to_jsonb(OLD));
+        RETURN OLD;
+    ELSIF (TG_OP = 'UPDATE') THEN
+        INSERT INTO raw.customers_changelog (operation, old_data, new_data)
+        VALUES ('U', to_jsonb(OLD), to_jsonb(NEW));
+        RETURN NEW;
+    ELSIF (TG_OP = 'INSERT') THEN
+        INSERT INTO raw.customers_changelog (operation, new_data)
+        VALUES ('I', to_jsonb(NEW));
+        RETURN NEW;
+    END IF;
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Backfill existing customer records
+INSERT INTO raw.customers_changelog (operation, new_data, changed_by, changed_at)
+SELECT 
+    'I', 
+    to_jsonb(c), 
+    CURRENT_USER, 
+    NOW()
+FROM operations.customers c;  -- Assuming source table is operations.customers
+
+-- Create trigger for customer changes
+CREATE TRIGGER customers_cdc_trigger
+AFTER INSERT OR UPDATE OR DELETE ON operations.customers
+FOR EACH ROW EXECUTE FUNCTION raw.customers_audit_func();
+
+-- Initialize CDC sync state for customers
+INSERT INTO intermediate.cdc_sync_state (table_name) 
+VALUES ('operations.customers') 
+ON CONFLICT DO NOTHING;
+
+-- Create customer type
+CREATE TYPE intermediate.customer_type AS (
+    customer_id BIGINT,
+    customer_name VARCHAR(500),
+    is_active BOOLEAN,
+    customer_address VARCHAR(500),
+    updated_at TIMESTAMP(3),
+    updated_by BIGINT,
+    created_at TIMESTAMP(3),
+    created_by BIGINT
+);
+
+-- Create sync procedure for customers
+CREATE OR REPLACE PROCEDURE intermediate.sync_customers_target()
+LANGUAGE plpgsql AS $$
+DECLARE
+    _last_id BIGINT;
+    _change RECORD;
+    _new_row intermediate.customer_type;
+    _old_row intermediate.customer_type;
+BEGIN
+    SELECT last_processed_change_id INTO _last_id
+    FROM intermediate.cdc_sync_state
+    WHERE table_name = 'operations.customers';
+
+    FOR _change IN
+        SELECT change_id, operation, old_data, new_data, changed_at
+        FROM raw.customers_changelog
+        WHERE change_id > _last_id
+        ORDER BY change_id
+    LOOP
+        IF _change.operation = 'I' THEN
+            _new_row := jsonb_populate_record(null::intermediate.customer_type, _change.new_data);
+            
+            INSERT INTO intermediate.customers (
+                customer_id, customer_name, is_active, customer_address,
+                updated_at, updated_by, created_at, created_by,
+                effective_start, operation_type, change_timestamp
+            )
+            VALUES (
+                _new_row.customer_id,
+                _new_row.customer_name,
+                _new_row.is_active,
+                _new_row.customer_address,
+                _new_row.updated_at,
+                _new_row.updated_by,
+                _new_row.created_at,
+                _new_row.created_by,
+                _change.changed_at,
+                'I',
+                _change.changed_at
+            );
+
+        ELSIF _change.operation = 'U' THEN
+            _new_row := jsonb_populate_record(null::intermediate.customer_type, _change.new_data);
+            
+            UPDATE intermediate.customers
+            SET effective_end = _change.changed_at,
+                is_current = false
+            WHERE customer_id = _new_row.customer_id
+              AND is_current = true;
+
+            INSERT INTO intermediate.customers (
+                customer_id, customer_name, is_active, customer_address,
+                updated_at, updated_by, created_at, created_by,
+                effective_start, operation_type, change_timestamp
+            )
+            VALUES (
+                _new_row.customer_id,
+                _new_row.customer_name,
+                _new_row.is_active,
+                _new_row.customer_address,
+                _new_row.updated_at,
+                _new_row.updated_by,
+                _new_row.created_at,
+                _new_row.created_by,
+                _change.changed_at,
+                'U',
+                _change.changed_at
+            );
+
+        ELSIF _change.operation = 'D' THEN
+            _old_row := jsonb_populate_record(null::intermediate.customer_type, _change.old_data);
+            
+            UPDATE intermediate.customers
+            SET effective_end = _change.changed_at,
+                is_current = false,
+                operation_type = 'D'
+            WHERE customer_id = _old_row.customer_id
+              AND is_current = true;
+        END IF;
+
+        _last_id := _change.change_id;
+    END LOOP;
+
+    UPDATE intermediate.cdc_sync_state
+    SET last_processed_change_id = _last_id
+    WHERE table_name = 'operations.customers';
+
+    COMMIT;
+END;
+$$;
+
+-- Test the sync
+CALL intermediate.sync_customers_target();
+
+--
+select count(1) from raw.customers_changelog;
+select count(1) from intermediate.customers;
+```
+
+### Automating the load with a CRON Job
+In order to automate the loading 
 
 ## Setup
 ### Spining up the source PostgreSQL database
@@ -37,21 +899,6 @@ Next, the PostgreSQL can be deployed using:
 ```bash
 docker compose up
 ```
-
-## Configuring local Airflow deployment
-To orchestrate the data pipeline responsible for moving and transforming data from the source database to the analytical instance we are going to use Airflow.
-Airflow is the gold standard in terms of Data Orchestration, with features that enables implementing pipelines that cover almost all required business requirements.
-To deploy it locally, we are going to use the Astro CLI, as it facilitates the configuration of the local infrastructure on a testing setting (just like the case of our project).
-As the Airflow project is already organized in the current project repository, in order to create a new Airflow instance locally, you only need to execute:
-```bash
-astro dev start
-```
-And access the Airflow Webserver at `localhost:8080`.
-To stop the Airflow service, just execute the command:
-```bash
-astro dev stop
-```
-## 
 
 ## Testing the API endpoints
 With the application deployed through Docker Compose, we are able to test the API endpoints to return the requested reports:
