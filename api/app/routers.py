@@ -1,9 +1,9 @@
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 from typing import List
-from ..config.database import get_db
-from ..models.analytics import OpenOrder, TopDeliveryDate, OpenProduct, TopCustomer
-from ..services.analytics import (
+from .database import get_db
+from .models import OpenOrder, TopDeliveryDate, OpenProduct, TopCustomer
+from .analytics import (
     get_open_orders,
     get_top_delivery_dates,
     get_open_products,
