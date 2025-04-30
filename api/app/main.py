@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from .routers import analytics
+from .routers import router
 
 app = FastAPI(
     title="ACME Analytics API",
@@ -7,7 +7,7 @@ app = FastAPI(
     version="1.0.0",
 )
 
-app.include_router(analytics.router)
+app.include_router(router)
 
 
 @app.get("/health")
