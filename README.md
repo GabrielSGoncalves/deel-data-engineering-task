@@ -24,7 +24,7 @@ If you opt-in to use CDC tools, we have the following pre-set configurations in 
 - **Replication Slot**: `cdc_pgoutput`
 - **Publication Name**: `cdc_publication`
 
-Extra informations and tips about the task execution can be found in the task description document shared by our recruiting team.
+Extra information and tips about the task execution can be found in the task description document shared by our recruiting team.
 For any questions, feel free to reach us out through data-platform@deel.com 
 
 # ACME Analytical Data Platform
@@ -37,8 +37,8 @@ data.
 3. Offer a dimensional data model to answer the business queries.
 4. Provide access to fresh data to consumers as soon as possible (near real-time).
 
-## Project Rational and architecture
-As we are bounded to a restricted time limit to develop the Analytical Platform, we are going to focus on using tools and methods that can proove the concept, but are not intended for production.
+## Project Rational
+As we are bounded to a restricted time limit to develop the Analytical Platform, we are going to focus on using tools and methods that can prove the concept, but are not intended for production.
 The main components of our architecture are:
 - **Source database (Postgres finance_db.operations):** We are going to use the customized Postgres container provided in the project requirements, deploying it through Docker Compose.
 - **Analytical database (Postgres finance_db.raw/intermediate/presentation)**: We decided to use the same Postgres instance as the source database (finance_db.operations), in order to focus on the design of the data pipeline and the data model, instead of the storage infrastructure.
@@ -47,18 +47,18 @@ The main components of our architecture are:
 - **API:** Dockerized FastAPI deployed on the same network as the Postgres finance_db container
 
 ## CDC Data Pipeline creation
-In this session we are going through the process of creating all the resources needed to synchronize data from the source database and also model it on the Data Warehouse schemas. Make sure to follow every step, creating all the resources indicated in the code blocks in order to be able to successfully test the API Application in the last part.
+In this section we are going through the process of creating all the resources needed to synchronize data from the source database and also model it on the Data Warehouse schemas. Make sure to follow every step, creating all the resources indicated in the code blocks in order to be able to successfully test the API Application in the last part.
 All the resources indicated here are also defined in individual DDL files in the `sql/` folder, and subfolder `raw`,  `intermediate` and `presentation` reflecting its respective schemas.
 
-### Overview of the data flowing through the 
+### Overview of the data flowing through the pipeline
 Below is a diagram representing the main resources used for implementing the CDC logic for the `orders` table. The other tables, `order_items`, `products` and `customers` follow the same logic.
 ![Pipeline Logic](images/acme_pipeline_logic.png)
 
-### Synchronization logic
-To implement a synchronization between the source database and the Data Warehouse (represented by the raw, intermediate and presentation schemas) we used a CDC approach with a function ({table_name}_audit_func) that responds to triggers ({table_name}_cdc_trigger) based on insert, update or delete events for the source table. The output for this function are records with the event type ('I', 'U' or 'D') for column `operatio`, and also the information about previous data for that record in column `old_data` (as JSON), and the `new_data` (also as JSON).
+### Synchronization Logic
+To implement a synchronization between the source database and the Data Warehouse (represented by the raw, intermediate and presentation schemas) we used a CDC approach with a function (`{table_name}_audit_func`) that responds to triggers (`{table_name}_cdc_trigger`) based on insert, update or delete events for the source table. The output for this function are records with the event type ('I', 'U' or 'D') for column `operation`, and also the information about previous data for that record in column `old_data` (as JSON), and the `new_data` (also as JSON).
 
 ### Slowly Changing Dimension logic
-As all tables can have inplace updates, we decided to use a Slowly Changing Dimension Type-2 approach in order to keep the history for each record. The SCD type-2 operation is performed for each one of the 4 tables by the procedure sync_{table_name}_items_target. Each procedure writes the data from change_logs tables into the respective intermediate tables, adding metadata and also the boolean information for the column `is_current`, which dictates if this record is the last version that reflects the source database.
+As all tables can have inplace updates, we decided to use a Slowly Changing Dimension Type-2 approach in order to keep the history for each record. The SCD type-2 operation is performed for each one of the 4 tables by the procedure `sync_{table_name}_target`. Each procedure writes the data from change_logs tables into the respective intermediate tables, adding metadata and also the boolean information for the column `is_current`, which dictates if this record is the last version that reflects the source database.
 
 ### Presentation schema
 The presentation schema is composed of views that reads from the intermediate tables, filtering by `is_current=True`, resulting in the last updated version for each table, without duplications. This is also the schema used by the API endpoints to return the information requested on the logistic reports.
@@ -73,14 +73,14 @@ Next, the PostgreSQL (and the FastAPI) can be deployed using:
 ```bash
 docker compose up
 ```
-We used [Beekeeper Studio](https://www.beekeeperstudio.io/) SQL Client to perform all the testing and resource creation described in the next sessions.
+We used [Beekeeper Studio](https://www.beekeeperstudio.io/) SQL Client to perform all the testing and resource creation described below.
 
 
 ### DDLs and DMLs for the Data Pipeline
-In this session we are going to define the DDLs and DMLs needed to create all the Postgres resources for the implementation of the Data Pipeline. Make sure to execure it in sequence.
+Next, we are going to define the DDLs and DMLs needed to create all the Postgres resources for the implementation of the Data Pipeline. Make sure to execure it in sequence.
 
 #### Schemas and tables DDL
-In this session we are going to create the target schemas and tables our Data Platform.
+Next, we are going to create the target schemas and tables our Data Platform.
 ```sql
 create schema raw;
 create schema intermediate;
@@ -924,7 +924,7 @@ SELECT cron.schedule(
     $$
 );
 ```
-So based on what was presented in this session, the data downtime between source database and the Analytical platform is 3 minutes.
+So based on what was presented in this section, the data downtime between source database and the Analytical platform is 3 minutes.
 
 ## API Development
 The last part of the project requirement was the development of an API that enabled users to fetch the  information from the Data Platform, with the following endpoints:
@@ -941,7 +941,17 @@ about top 3 Customers with more pending orders
 We used FastAPI to develop the resources for the API (can be found on the `/api` folder). We also modified the original Docker Compose with the Postgres source database to also contain a container running the FastAPI backend. 
 
 ### Testing the API endpoints
-With the application deployed through Docker Compose, we are able to test the API endpoints to return the requested reports:
+With the application deployed through Docker Compose, verify that both containers are running and healthy by executing:
+```bash
+docker compose ps
+```
+You should get an output similar to the one below:
+```
+NAME                                           COMMAND                  SERVICE             STATUS              PORTS
+deel-data-engineering-task-api-1               "uvicorn app.main:ap…"   api                 running             0.0.0.0:8000->8000/tcp, :::8000->8000/tcp
+deel-data-engineering-task-transactions-db-1   "docker-entrypoint.s…"   transactions-db     running             0.0.0.0:5433->5432/tcp, :::5433->5432/tcp
+```
+After that, we can test the API endpoints:
 ```bash
 # Health check
 curl http://localhost:8000/health
@@ -952,25 +962,26 @@ curl "http://localhost:8000/analytics/orders/top?limit=3"
 curl "http://localhost:8000/analytics/orders/product"
 curl "http://localhost:8000/analytics/orders/customers?status=open&limit=3"
 ```
+The API requests should return the results similar to the one from the queries found in the `sql/analytical_queries.sql` file, as this is the logic implemented in the API models.
+
+## Limitations
+The Data architecture and pipelines implemented above have managed to provide the required resources for the stakeholder, but still, the focus was on proving the concept, not putting it into production. A few important notes on the limitations of our solution:
+1. OLTP database used as Warehouse: Ideally, we would have a different database with OLAP features to use as Data Warehouse, not use the same transactional database for analytical workloads.
+2. The CDC approach used source database resources: instead of having its own infrastructure. Service like Kafka, AWS Kinesis, Red Panda display high availability, with no impact on the source system.
+3. The pipeline was built using resources from the Postgres system: which lacks scalability (only vertical scaling). Ideally we would use an MPP platform like Spark, Snowflake, Bigquery or Trino to execute the transformations.
+4. Data model lacked a clear lineage and organization: Although we commited all the DDLs to the project repo, this methodology may become fragile, as more data engineers start contributing to the project. Ideally, we would use dbt so track all the data assets created, using best practices from Software engineering. Also, dbt would allow us to have lineage and build a semantic layer for our Data Warehouse.
+5. Data Observability and quality checks: Procedures, functions and triggers are easy to implement, but they lack the observability needed to track complex data pipelines. Also, there were no data quality checks in any part of our pipeline.
 
 ## Final thoughts
-As mentioned in the project introduction, the architecture we have implemented is focus on showing the concept of integrating a near real-time transactional database, with a Data Analytical Platform in order to provide report resources for the logistic department. With the proof of concept validated by the stakeholders, the next step would invariably move into the discussion of a robust and resilient Data architecture that can offer the resources presented in the PoC, without the limitations.
+As mentioned in the project introduction, the architecture we have implemented focus on showing the concept of integrating a near real-time transactional database, with a Data Analytical Platform in order to provide report resources for the logistic department. With the proof of concept validated by the stakeholders, the next step would invariably move into the discussion of a robust and resilient Data architecture that can offer the resources presented in the PoC, without the limitations.
 The diagram below ilustrates a suggested Data Architecture that relies on Cloud Services to achieve it.
 ![Suggested Data Architecture](./images/acme_suggested_data_architecture.png)
 This architecture would have the following components:
-1. Source System: In our case it would still be the Postgres we worked on the PoC, deployed on a more reliable way in multiple Availability Zones, probably an AWS RDS, with a read-replica.
-2. Streaming Layer: This component would replace the change log tables and audit functions with triggers we created with Postgres. AWS has recently release a new feature for streaming between OLTPs like Postgres and MySQL hosted in RDS straight to Iceberg Tables on S3, through Kinesis Firehose. This could be an easy way to implement the streaming process. But also, we could use other services like AWS DMS or MSK.
-3. Storage and Processing Layer: This would be the core layer of our Analytical Platform, as we would use Snowflake storage and processing power. Snowflake is a modern Cloud Data Warehouse, with a focus on data consumers, but a lot of features in terms of integration. Snowflake allows us to access Iceberg Tables as part of its data catalog, meaning we could have access data that's being streamed to S3 right away, in a near real-time fashion, without having to replicate it in Snowflake internal storage. For the other schemas like INTERMEDIATE and PRESENTATION, we could use Snowflake storage
-4. Orchestration Layer: We would use dbt as the ETL + Semantic Layer, combined with Airflow as Orchestrator. These two tools are a really powerful combination, enabling pretty much any type of data transformation.
-5. Presentation Layer: To enable access to the processed data in Snowflake PRESENTATION schema, we could deploy our Dockerized FastAPI application using AWS ECS, and also use API Gateway as security layer between the requests coming from outside our VPC, and our Application. 
-
-## Project limitations
-1. Describe the limitation of using Postgres (OLTP) as warehouse, list other OLAPs that could be used (Snowflake, Redshift, ClickHouse, Databricks)
-2. Airflow deployment using Astro CLI -> use a managed service or Kubernetes
-
-## Next steps
-1. DRY refactoring: Modularize the SQL code, avoiding the creation of repetitive functions and procedures by replacing hardcode variables as parameters
-
+1. **Source System:** In our case it would still be the Postgres we worked on the PoC, deployed on a more reliable (multiple Availability Zones), probably using an AWS RDS, with a read-replicas for the data pipelines service users.
+2. **Streaming Layer:** This component would replace the change log tables and audit functions with triggers we created with Postgres. AWS has recently release a new feature for streaming between OLTPs like Postgres and MySQL hosted in RDS straight to Iceberg Tables on S3, through Kinesis Firehose. This could be an easy way to implement the streaming process. But also, we could use other services like AWS DMS or MSK.
+3. **Storage and Processing Layer:** This would be the core layer of our Analytical Platform, as we would use Snowflake storage and processing power. Snowflake is a modern Cloud Data Warehouse, with a focus on data consumers, but a lot of features in terms of integration. Snowflake allows us to access Iceberg Tables as part of its data catalog, meaning we could have access data that's being streamed to S3 right away, in a near real-time fashion, without having to replicate it in Snowflake internal storage. For the other schemas like INTERMEDIATE and PRESENTATION, we could use Snowflake storage
+4. **Orchestration Layer:** We would use dbt as the ETL + Semantic Layer, combined with Airflow as Orchestrator. These two tools are a really powerful combination, enabling pretty much any type of data transformation.
+5. **Presentation Layer:** To enable access to the processed data in Snowflake PRESENTATION schema, we could deploy our Dockerized FastAPI application using AWS ECS, and also use API Gateway as security layer between the requests coming from outside our VPC, and our Application. 
 
 ## References:
 - [PostgreSQL Change Data Capture (CDC): The Complete Guide (DataCater)](https://datacater.io/blog/2021-09-02/postgresql-cdc-complete-guide.html)
