@@ -9,7 +9,7 @@ def get_open_orders(db: Session):
         status,
         count(1) quantity
     from
-        operations.orders
+        presentation.orders
     where
         status != 'COMPLETED'
     group by
@@ -25,7 +25,7 @@ def get_top_delivery_dates(db: Session, limit: int):
         delivery_date,
         count(1) quantity
     from
-        operations.orders
+        presentation.orders
     where
         status != 'COMPLETED'
     group by
@@ -43,9 +43,9 @@ def get_open_products(db: Session):
         oi.product_id,
         sum(oi.quanity) total_items
     from
-        operations.order_items oi
+        presentation.order_items oi
     join
-        operations.orders o
+        presentation.orders o
         on oi.order_id = o.order_id
     where
         o.status != 'COMPLETED'
@@ -65,9 +65,9 @@ def get_top_customers(db: Session, limit: int):
         c.customer_name,
         count(1) quantity
     from
-        operations.orders o
+        presentation.orders o
     join
-        operations.customers c
+        presentation.customers c
         on o.customer_id = c.customer_id
     where
         o.status != 'COMPLETED'
